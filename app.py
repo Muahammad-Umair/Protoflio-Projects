@@ -10,21 +10,33 @@ import json
 
 st.set_page_config(page_title="My AI Projects Portfolio", layout="wide")
 
-
-
+# umch365 debug above the debug section start
 # DEBUG block - remove after testing
-import streamlit as _st
+import streamlit as _st, json as _json
+
 try:
     present = "ADMIN_PASSWORD" in _st.secrets
     val = _st.secrets.get("ADMIN_PASSWORD")
-    if val is None:
-        _st.write("ADMIN_PASSWORD present:", present, "| value is None")
-    else:
-        _st.write("ADMIN_PASSWORD present:", present, "| length:", len(val))
+    _st.write("ADMIN_PASSWORD present:", present, "| length:", len(val) if val else "None")
 except Exception as e:
-    _st.write("Error reading secrets:", e)
-# End DEBUG
+    _st.write("Error reading ADMIN_PASSWORD:", e)
 
+try:
+    sa_raw = _st.secrets.get("GCP_SERVICE_ACCOUNT")
+    if not sa_raw:
+        _st.write("GCP_SERVICE_ACCOUNT: not found in secrets")
+    else:
+        sa = _json.loads(sa_raw) if isinstance(sa_raw, str) else sa_raw
+        _st.write("Service account email (from secrets):", sa.get("client_email"))
+except Exception as e:
+    _st.write("Service account parse error:", e)
+
+try:
+    sheet_present = "GSHEET" in _st.secrets and bool(_st.secrets["GSHEET"].get("sheet_id"))
+    _st.write("GSHEET.sheet_id present:", sheet_present)
+except Exception as e:
+    _st.write("Error reading GSHEET:", e)
+# End DEBUG
 
 # ---------- CONFIG ----------
 # Secrets used (set these in Streamlit Cloud -> Settings -> Secrets)
@@ -68,7 +80,13 @@ def cloudinary_upload(file_bytes: bytes, filename: str, timeout=30):
     try:
         if cloud.get("api_secret"):
             # Signed / auth upload using basic auth
-            res = requests.post(url, files=files, data=data, auth=(cloud["api_key"], cloud["api_secret"]), timeout=timeout)
+            res = requests.post(
+                url,
+                files=files,
+                data=data,
+                auth=(cloud["api_key"], cloud["api_secret"]),
+                timeout=timeout,
+            )
         else:
             # Unsigned upload (requires upload_preset set in Cloudinary console)
             res = requests.post(url, files=files, data=data, timeout=timeout)
@@ -97,7 +115,7 @@ def open_sheet():
     creds = Credentials.from_service_account_info(sa, scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_id)
-    ws = sh.worksheet(GSHEET.get("worksheet_name", "AI Portfolio Data"))
+    ws = sh.worksheet(GSHEET.get("worksheet_name", "Sheet1"))
     return ws
 
 def add_project_to_sheet(title, description, link, media_url, media_type):
