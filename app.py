@@ -10,6 +10,22 @@ import json
 
 st.set_page_config(page_title="My AI Projects Portfolio", layout="wide")
 
+
+
+# DEBUG block - remove after testing
+import streamlit as _st
+try:
+    present = "ADMIN_PASSWORD" in _st.secrets
+    val = _st.secrets.get("ADMIN_PASSWORD")
+    if val is None:
+        _st.write("ADMIN_PASSWORD present:", present, "| value is None")
+    else:
+        _st.write("ADMIN_PASSWORD present:", present, "| length:", len(val))
+except Exception as e:
+    _st.write("Error reading secrets:", e)
+# End DEBUG
+
+
 # ---------- CONFIG ----------
 # Secrets used (set these in Streamlit Cloud -> Settings -> Secrets)
 # st.secrets["CLOUDINARY"] -> table with keys: cloud_name, api_key, api_secret (optional), upload_preset (optional)
