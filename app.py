@@ -97,7 +97,7 @@ def open_sheet():
     creds = Credentials.from_service_account_info(sa, scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_id)
-    ws = sh.worksheet(GSHEET.get("worksheet_name", "Sheet1"))
+    ws = sh.worksheet(GSHEET.get("worksheet_name", "AI Portfolio Data"))
     return ws
 
 def add_project_to_sheet(title, description, link, media_url, media_type):
