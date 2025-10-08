@@ -6,60 +6,81 @@ import requests
 import gspread
 from google.oauth2.service_account import Credentials
 from io import BytesIO
+import json
 
 st.set_page_config(page_title="My AI Projects Portfolio", layout="wide")
 
 # ---------- CONFIG ----------
 # Secrets used (set these in Streamlit Cloud -> Settings -> Secrets)
-# st.secrets["ADMIN_PASSWORD"] - string, admin password
-# st.secrets["CLOUDINARY"] = {"cloud_name": "...", "api_key": "...", "api_secret": "..."}
-# st.secrets["GSHEET"] = {"sheet_id": "your_google_sheet_id", "worksheet_name": "Sheet1"}
-# st.secrets["GCP_SERVICE_ACCOUNT"] = <full service account JSON as nested dict> OR as string (works both ways)
+# st.secrets["CLOUDINARY"] -> table with keys: cloud_name, api_key, api_secret (optional), upload_preset (optional)
+# st.secrets["GSHEET"] -> table with keys: sheet_id, worksheet_name
+# st.secrets["GCP_SERVICE_ACCOUNT"] -> triple-quoted JSON string (full service account JSON)
+# st.secrets["ADMIN_PASSWORD"] -> admin password string
 
 CLOUDINARY = st.secrets.get("CLOUDINARY", {})
 GSHEET = st.secrets.get("GSHEET", {})
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD")
 GCP_SA = st.secrets.get("GCP_SERVICE_ACCOUNT")
 
+# Basic config checks
 if not CLOUDINARY or not GSHEET:
-    st.error("App not configured. Please set CLOUDINARY and GSHEET in Streamlit secrets.")
+    st.error("App not configured. Please set CLOUDINARY and GSHEET in Streamlit Secrets.")
     st.stop()
 
 # ---------- Helpers ----------
-def cloudinary_upload(file_bytes: bytes, filename: str):
+def cloudinary_upload(file_bytes: bytes, filename: str, timeout=30):
     """
-    Upload file bytes to Cloudinary via unsigned upload.
-    Requires CLOUDINARY config in st.secrets.
+    Upload file bytes to Cloudinary.
+    - If CLOUDINARY.upload_preset exists -> unsigned upload.
+    - Otherwise if api_secret exists -> signed/basic auth upload.
     Returns secure_url on success.
+    Raises RuntimeError on failure with helpful message.
     """
     cloud = CLOUDINARY
+    if not cloud.get("cloud_name"):
+        raise ValueError("Cloudinary not configured (cloud_name missing in secrets).")
+
     url = f"https://api.cloudinary.com/v1_1/{cloud['cloud_name']}/auto/upload"
-    data = {
-        "upload_preset": cloud.get("upload_preset", ""),  # optional if using unsigned preset
-        "api_key": cloud.get("api_key")
-    }
+    data = {}
+    if cloud.get("upload_preset"):
+        data["upload_preset"] = cloud["upload_preset"]
+    if cloud.get("api_key"):
+        data["api_key"] = cloud["api_key"]
+
     files = {"file": (filename, file_bytes)}
-    # If you rely on signed uploads you can send timestamp + signature (not included here).
-    # Using simple approach with basic auth if api_secret available:
-    if cloud.get("api_secret"):
-        # Use basic auth
-        res = requests.post(url, files=files, data=data, auth=(cloud["api_key"], cloud["api_secret"]))
-    else:
-        res = requests.post(url, files=files, data=data)
-    res.raise_for_status()
-    return res.json()["secure_url"]
+
+    try:
+        if cloud.get("api_secret"):
+            # Signed / auth upload using basic auth
+            res = requests.post(url, files=files, data=data, auth=(cloud["api_key"], cloud["api_secret"]), timeout=timeout)
+        else:
+            # Unsigned upload (requires upload_preset set in Cloudinary console)
+            res = requests.post(url, files=files, data=data, timeout=timeout)
+        res.raise_for_status()
+        payload = res.json()
+        # prefer secure_url if present
+        return payload.get("secure_url") or payload.get("url") or payload
+    except requests.exceptions.RequestException as e:
+        # try to provide response body if available for debugging
+        body = ""
+        try:
+            body = e.response.text if e.response is not None else ""
+        except Exception:
+            body = ""
+        raise RuntimeError(f"Cloudinary upload failed: {e}\nResponse body: {body}")
 
 def open_sheet():
-    """Open Google Sheet and return worksheet object."""
-    # Service account: can be supplied either as dict (st.secrets) or a JSON string
+    """Open Google Sheet and return worksheet object (with helpful errors)."""
     sa = GCP_SA
     if isinstance(sa, str):
-        import json
         sa = json.loads(sa)
+    sheet_id = GSHEET.get("sheet_id")
+    if not sheet_id:
+        raise ValueError("GSHEET.sheet_id missing in secrets. Put your Google Sheet ID in GSHEET.sheet_id")
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(sa, scopes=scopes)
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(GSHEET["sheet_id"])
+    sh = gc.open_by_key(sheet_id)
     ws = sh.worksheet(GSHEET.get("worksheet_name", "Sheet1"))
     return ws
 
@@ -72,12 +93,11 @@ def add_project_to_sheet(title, description, link, media_url, media_type):
 def read_projects_from_sheet():
     ws = open_sheet()
     rows = ws.get_all_values()
-    # assume header row exists
+    # expect header row present
     if not rows or len(rows) < 2:
         return []
     header = rows[0]
     data_rows = rows[1:]
-    # map rows to dicts (handles missing columns)
     projects = []
     for r in data_rows:
         d = {header[i]: r[i] if i < len(r) else "" for i in range(len(header))}
@@ -93,11 +113,12 @@ with tabs[0]:
     try:
         projects = read_projects_from_sheet()
     except Exception as e:
-        st.warning("Unable to read projects from Google Sheets. If this is the first time, no projects exist yet.")
+        st.warning("Unable to read projects from Google Sheets. If this is the first time, no projects exist yet or the app is not fully configured.")
+        st.info("If you're the owner, go to Admin tab to add projects after configuring Secrets.")
         projects = []
 
     if not projects:
-        st.info("No projects yet. If you're the owner, add projects from Admin tab.")
+        st.info("No projects yet. If you're the owner, add projects from the Admin tab.")
     else:
         cols = st.columns(3)
         for i, p in enumerate(projects):
@@ -113,10 +134,13 @@ with tabs[0]:
                     st.markdown(f"[Open Demo]({link})")
                 if murl:
                     # embed image/video if Cloudinary link or standard url
-                    if mtype.startswith("video") or murl.lower().endswith((".mp4", ".webm")):
-                        st.video(murl)
-                    else:
-                        st.image(murl, use_column_width=True)
+                    try:
+                        if (isinstance(mtype, str) and mtype.startswith("video")) or murl.lower().endswith((".mp4", ".webm")):
+                            st.video(murl)
+                        else:
+                            st.image(murl, use_column_width=True)
+                    except Exception:
+                        st.write("Media could not be displayed.")
                 st.caption(p.get("CreatedAt", ""))
 
 with tabs[1]:
@@ -139,7 +163,7 @@ with tabs[1]:
             title = st.text_input("Project title", max_chars=120)
             desc = st.text_area("Short description")
             link = st.text_input("Demo / Repo link (optional)")
-            media = st.file_uploader("Image or video (png/jpg/mp4)", type=["png", "jpg", "jpeg", "mp4"])
+            media = st.file_uploader("Image or video (png/jpg/mp4). Keep files small (<= 25 MB).", type=["png", "jpg", "jpeg", "mp4"])
             submitted = st.form_submit_button("Add project")
 
         if submitted:
@@ -149,14 +173,25 @@ with tabs[1]:
                 media_url = ""
                 media_type = ""
                 if media:
+                    # file-like object; check size if available (streamlit InMemoryUploadedFile has .size)
                     try:
-                        # read bytes and upload to cloudinary
-                        bytes_data = media.read()
-                        media_type = media.type or ""
-                        media_url = cloudinary_upload(bytes_data, media.name)
-                        st.success("Uploaded media to Cloudinary.")
+                        size_ok = True
+                        max_bytes = 25 * 1024 * 1024  # 25 MB
+                        if hasattr(media, "size") and media.size:
+                            if media.size > max_bytes:
+                                size_ok = False
+                                st.error("File too large. Please upload files <= 25 MB.")
+                        if size_ok:
+                            bytes_data = media.read()
+                            media_type = media.type or ""
+                            try:
+                                media_url = cloudinary_upload(bytes_data, media.name)
+                                st.success("Uploaded media to Cloudinary.")
+                            except Exception as e:
+                                st.error(f"Failed to upload media: {e}")
+                                media_url = ""
                     except Exception as e:
-                        st.error(f"Failed to upload media: {e}")
+                        st.error(f"Failed reading uploaded file: {e}")
                         media_url = ""
 
                 try:
